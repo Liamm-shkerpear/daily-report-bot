@@ -1,6 +1,7 @@
 const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { DISCORD_TOKEN } = require("./config");
 const { startScheduler } = require("./scheduler");
+const { catchUpIfMissed } = require("./services/catchupService");
 
 const client = new Client({
   intents: [
@@ -12,9 +13,11 @@ const client = new Client({
   partials: [Partials.Channel, Partials.Message, Partials.GuildMember],
 });
 
-client.once("ready", () => {
+client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
   startScheduler(client);
+   // tự chạy bù nếu hôm qua chưa check
+  await catchUpIfMissed(client);
 });
 
 client.login(DISCORD_TOKEN);
