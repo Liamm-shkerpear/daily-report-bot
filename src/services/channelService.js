@@ -1,88 +1,151 @@
 const { DateTime } = require("luxon");
-const { buildTodayChannelName } = require("../utils/nameFormat");
-const { DAILY_CATEGORY_ID, PUNISH_CHANNEL_ID, TIMEZONE, GUILD_ID } = require("../config");
+const { buildTodayThreadName } = require("../utils/nameFormat");
+const {
+  PUNISH_CHANNEL_ID,
+  TIMEZONE,
+  GUILD_ID,
+  REPORT_CHANNEL_ID,
+} = require("../config");
 const { loadDB, saveDB } = require("../utils/storage");
 
-async function createTodayReportChannel(client) {
+// Tạo / đảm bảo thread report cho hôm nay
+async function ensureTodayReportThread(client) {
+  console.log("[THREAD] ensureTodayReportThread called");
+
   const guild = await client.guilds.fetch(GUILD_ID);
   const punishChannel = await guild.channels.fetch(PUNISH_CHANNEL_ID);
+  const reportChannel = await guild.channels.fetch(REPORT_CHANNEL_ID);
 
-  const now = DateTime.now().setZone(TIMEZONE);
-  const today = now.startOf("day");
-  const channelName = buildTodayChannelName(today);
-
-  const channels = await guild.channels.fetch();
-  const exists = channels.find(
-    (ch) => ch && ch.type === 0 && ch.parentId === DAILY_CATEGORY_ID && ch.name === channelName
+  console.log(
+    "[THREAD] reportChannel:",
+    reportChannel.id,
+    reportChannel.name,
+    reportChannel.type
   );
 
-  // 🔴 QUAN TRỌNG: nếu đã có, trả về channel đó
-  if (exists) return exists;
-
-  const newChannel = await guild.channels.create({
-    name: channelName,
-    type: 0,
-    parent: DAILY_CATEGORY_ID,
-    topic: `Daily report for ${today.toFormat("d-M-yyyy")} (created by bot at ${now.toFormat("HH:mm")})`,
-  });
-
-  await newChannel.send(
-    [
-      `📌 **Daily Report — ${today.toFormat("d-M-yyyy")}**`,
-      `Mọi người viết report trong ngày tại đây.`,
-      ``,
-      `A. Investigation done today`,
-      `B. Gaps identified`,
-      `C. Clarifications achieved`,
-      `D. Next actions`,
-    ].join("\n")
-  );
-
-  await punishChannel.send(`✅ Đã tạo kênh report mới: <#${newChannel.id}>`);
-
-  // 🔴 QUAN TRỌNG: luôn return
-  return newChannel;
-}
-
-// catch-up nếu hôm nay chưa có channel thì tạo
-async function catchUpCreateChannelIfMissed(client) {
-  const guild = await client.guilds.fetch(GUILD_ID);
   const now = DateTime.now().setZone(TIMEZONE);
   const today = now.startOf("day");
   const key = today.toISODate();
-  const channelName = buildTodayChannelName(today);
+  const threadName = buildTodayThreadName(today);
+
+  console.log("[THREAD] today:", today.toISODate());
+  console.log("[THREAD] expected threadName:", threadName);
 
   const db = loadDB();
+  db.days = db.days || {};
 
-  const channels = await guild.channels.fetch();
-  const exists = channels.find(
-    (ch) => ch && ch.type === 0 && ch.parentId === DAILY_CATEGORY_ID && ch.name === channelName
-  );
-
-  if (exists) {
-    db.days[key] = db.days[key] || { dateLabel: today.toFormat("d-M-yyyy") };
-    db.days[key].createdChannelId = exists.id;
-    db.days[key].channelName = exists.name;
-    db.days[key].channelEnsuredAt = now.toISO();
-    saveDB(db);
-
-    return { created: false, channelId: exists.id };
+  // Nếu DB đã có threadId
+  if (db.days[key]?.threadId) {
+    console.log("[THREAD] found in DB:", db.days[key].threadId);
+    return {
+      ensured: true,
+      threadId: db.days[key].threadId,
+      threadName: db.days[key].threadName,
+      created: false,
+    };
   }
 
-  // chưa có → tạo
-  const newCh = await createTodayReportChannel(client);
+  // 1) tìm trong cache
+  let thread =
+    reportChannel.threads?.cache?.find((t) => t.name === threadName) || null;
 
-  if (!newCh) {
-    throw new Error("createTodayReportChannel returned undefined");
+  if (thread) {
+    console.log("[THREAD] found in cache:", thread.id);
   }
 
-  db.days[key] = db.days[key] || { dateLabel: today.toFormat("d-M-yyyy") };
-  db.days[key].createdChannelId = newCh.id;
-  db.days[key].channelName = newCh.name;
-  db.days[key].channelEnsuredAt = now.toISO();
+  // 2) fetch active threads
+  if (!thread) {
+    console.log("[THREAD] fetching active threads...");
+    const active = await reportChannel.threads.fetchActive();
+    thread = active.threads.find((t) => t.name === threadName) || null;
+    if (thread) {
+      console.log("[THREAD] found in active threads:", thread.id);
+    }
+  }
+
+  // 3) fetch archived threads
+  if (!thread) {
+    console.log("[THREAD] fetching archived threads...");
+    const archived = await reportChannel.threads.fetchArchived({ type: "public" });
+    thread = archived.threads.find((t) => t.name === threadName) || null;
+    if (thread) {
+      console.log("[THREAD] found in archived threads:", thread.id);
+    }
+  }
+
+  let created = false;
+
+  // 4) chưa có → tạo mới
+  if (!thread) {
+    console.log("[THREAD] creating new thread...");
+
+    try {
+      thread = await reportChannel.threads.create({
+        name: threadName,
+        autoArchiveDuration: 1440,
+        reason: `Daily report thread for ${today.toFormat("d-M-yyyy")}`,
+      });
+      created = true;
+
+      console.log("[THREAD] thread created:", thread.id, thread.name);
+
+      await thread.send(
+        [
+          `📌 **Daily Report — ${today.toFormat("d-M-yyyy")}**`,
+          `Mọi người viết report trong thread này.`,
+          ``,
+          `A. Investigation done today`,
+          `B. Gaps identified`,
+          `C. Clarifications achieved`,
+          `D. Next actions`,
+        ].join("\n")
+      );
+    } catch (err) {
+      console.error("[THREAD] FAILED to create thread:", err);
+      throw err;
+    }
+  }
+
+  // lưu DB
+  db.days[key] = {
+    ...(db.days[key] || {}),
+    dateLabel: today.toFormat("d-M-yyyy"),
+    threadId: thread.id,
+    threadName: thread.name,
+    threadEnsuredAt: now.toISO(),
+  };
+
   saveDB(db);
 
-  return { created: true, channelId: newCh.id };
+  console.log("[THREAD] saved to DB:", db.days[key]);
+
+  if (created) {
+    await punishChannel.send(
+      `✅ Đã tạo thread report mới: <#${thread.id}> (trong <#${REPORT_CHANNEL_ID}>)`
+    );
+  }
+
+  console.log("[THREAD] return:", {
+    threadId: thread.id,
+    threadName: thread.name,
+    created,
+  });
+
+  return {
+    ensured: true,
+    threadId: thread.id,
+    threadName: thread.name,
+    created,
+  };
 }
 
-module.exports = { createTodayReportChannel, catchUpCreateChannelIfMissed };
+// catch-up: chỉ gọi ensure
+async function catchUpCreateThreadIfMissed(client) {
+  console.log("[THREAD] catchUpCreateThreadIfMissed called");
+  return ensureTodayReportThread(client);
+}
+
+module.exports = {
+  ensureTodayReportThread,
+  catchUpCreateThreadIfMissed,
+};

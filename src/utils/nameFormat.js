@@ -1,5 +1,5 @@
-function buildReportChannelNames(date) {
-  // hỗ trợ nhiều kiểu để tìm channel cũ (nếu đặt tên không đồng nhất)
+function buildReportThreadNames(date) {
+  // hỗ trợ nhiều kiểu để tìm thread cũ (nếu đặt tên không đồng nhất)
   const d = date.day;
   const m = date.month;
   const y = date.year;
@@ -14,9 +14,9 @@ function buildReportChannelNames(date) {
   ];
 }
 
-function buildTodayChannelName(date) {
-  // report-14-1-2026 (không padding)
+function buildTodayThreadName(date) {
+  // report-14-1-2026
   return `report-${date.day}-${date.month}-${date.year}`;
 }
 
-module.exports = { buildReportChannelNames, buildTodayChannelName };
+module.exports = { buildReportThreadNames, buildTodayThreadName };

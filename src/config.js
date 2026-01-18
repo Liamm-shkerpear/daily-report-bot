@@ -6,6 +6,7 @@ module.exports = {
   PUNISH_CHANNEL_ID: process.env.PUNISH_CHANNEL_ID,
   DAILY_CATEGORY_ID: process.env.DAILY_CATEGORY_ID,
   TIMEZONE: process.env.TIMEZONE || "Asia/Ho_Chi_Minh",
+  REPORT_CHANNEL_ID: process.env.REPORT_CHANNEL_ID ,
 
   // danh sách user cố định
    TEAM_USER_IDS: [

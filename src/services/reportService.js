@@ -1,62 +1,80 @@
 const { DateTime } = require("luxon");
 const { fetchAllMessagesInChannel } = require("../utils/discordFetch");
-const { buildReportChannelNames } = require("../utils/nameFormat");
+const { buildReportThreadNames } = require("../utils/nameFormat");
 const { loadDB, saveDB } = require("../utils/storage");
 const {
   GUILD_ID,
   PUNISH_CHANNEL_ID,
-  DAILY_CATEGORY_ID,
+  REPORT_CHANNEL_ID,
   TIMEZONE,
   TEAM_USER_IDS,
 } = require("../config");
 
-async function runDailyCheck(client) {
-  const guild = await client.guilds.fetch(GUILD_ID);
-  await guild.members.fetch();
+async function findReportThread(reportChannel, targetDay) {
+  const possibleNames = buildReportThreadNames(targetDay);
 
+  // 1) active cache
+  let thread =
+    reportChannel.threads?.cache?.find((t) => possibleNames.includes(t.name)) || null;
+
+  // 2) active fetch
+  if (!thread) {
+    const active = await reportChannel.threads.fetchActive();
+    thread = active.threads.find((t) => possibleNames.includes(t.name)) || null;
+  }
+
+  // 3) archived fetch (public)
+  if (!thread) {
+    const archived = await reportChannel.threads.fetchArchived({ type: "public" });
+    thread = archived.threads.find((t) => possibleNames.includes(t.name)) || null;
+  }
+
+  return { thread, possibleNames };
+}
+
+async function runDailyCheck(client, targetISODate = null) {
+  const guild = await client.guilds.fetch(GUILD_ID);
+
+  // ❗ bỏ guild.members.fetch() để tránh rate limit (không cần cho logic này)
   const punishChannel = await guild.channels.fetch(PUNISH_CHANNEL_ID);
+  const reportChannel = await guild.channels.fetch(REPORT_CHANNEL_ID);
 
   const now = DateTime.now().setZone(TIMEZONE);
-  const targetDay = now.minus({ days: 1 }).startOf("day");
+
+  const targetDay = targetISODate
+    ? DateTime.fromISO(targetISODate).setZone(TIMEZONE).startOf("day")
+    : now.minus({ days: 1 }).startOf("day");
 
   const dayStart = targetDay;
   const dayEnd = targetDay.endOf("day");
 
-  // late: chỉ cần >= 00:00 hôm nay là late (tới hết ngày)
   const lateStart = targetDay.plus({ days: 1 }).startOf("day");
   const lateEnd = targetDay.plus({ days: 1 }).endOf("day");
 
-  // tìm channel hôm qua
-  const possibleNames = buildReportChannelNames(targetDay);
-  const channels = await guild.channels.fetch();
+  if (!TEAM_USER_IDS || TEAM_USER_IDS.length === 0) {
+    await punishChannel.send(`⚠️ TEAM_USER_IDS đang rỗng.`);
+    return;
+  }
 
-  const reportChannel = channels.find(
-    (ch) =>
-      ch && ch.type === 0 && ch.parentId === DAILY_CATEGORY_ID && possibleNames.includes(ch.name)
-  );
+  const { thread: reportThread, possibleNames } = await findReportThread(reportChannel, targetDay);
 
-  if (!reportChannel) {
+  if (!reportThread) {
     await punishChannel.send(
-      `⚠️ Không tìm thấy kênh report ngày ${targetDay.toFormat("d-M-yyyy")}.\nĐang tìm: ${possibleNames
+      `⚠️ Không tìm thấy thread report ngày ${targetDay.toFormat("d-M-yyyy")} trong <#${REPORT_CHANNEL_ID}>.\nĐang tìm: ${possibleNames
         .map((n) => `\`${n}\``)
         .join(", ")}`
     );
     return;
   }
 
-  if (!TEAM_USER_IDS || TEAM_USER_IDS.length === 0) {
-    await punishChannel.send(`⚠️ TEAM_USER_IDS đang rỗng. Hãy điền danh sách userId cố định trong src/config.js`);
-    return;
-  }
-
-  // fetch messages
   const msgsOnTime = await fetchAllMessagesInChannel(
-    reportChannel,
+    reportThread,
     dayStart.toMillis(),
     dayEnd.toMillis()
   );
+
   const msgsLate = await fetchAllMessagesInChannel(
-    reportChannel,
+    reportThread,
     lateStart.toMillis(),
     lateEnd.toMillis()
   );
@@ -64,24 +82,28 @@ async function runDailyCheck(client) {
   const onTimeSet = new Set(
     msgsOnTime.map((m) => m.author.id).filter((id) => TEAM_USER_IDS.includes(id))
   );
+
   const lateSet = new Set(
     msgsLate.map((m) => m.author.id).filter((id) => TEAM_USER_IDS.includes(id))
   );
 
-  // ưu tiên late => không missing
   const missing = TEAM_USER_IDS.filter((id) => !onTimeSet.has(id) && !lateSet.has(id));
   const late = TEAM_USER_IDS.filter((id) => lateSet.has(id) && !onTimeSet.has(id));
 
-  // lưu DB
   const db = loadDB();
+  db.days = db.days || {};
   const key = targetDay.toISODate();
+
   db.days[key] = {
-    channelId: reportChannel.id,
+    ...(db.days[key] || {}),
+    threadId: reportThread.id,
+    threadName: reportThread.name,
     dateLabel: targetDay.toFormat("d-M-yyyy"),
     missing,
     late,
     checkedAt: now.toISO(),
   };
+
   saveDB(db);
 
   const missingMentions = missing.length ? missing.map((id) => `<@${id}>`).join(", ") : "Không có ✅";
@@ -90,7 +112,7 @@ async function runDailyCheck(client) {
   await punishChannel.send(
     [
       `📌 **Daily Report Check — ${targetDay.toFormat("d-M-yyyy")}**`,
-      `Kênh: <#${reportChannel.id}>`,
+      `Thread: <#${reportThread.id}> (trong <#${REPORT_CHANNEL_ID}>)`,
       ``,
       `❌ **Chưa report (${missing.length})**: ${missingMentions}`,
       `⏰ **Report trễ (${late.length})**: ${lateMentions}`,
